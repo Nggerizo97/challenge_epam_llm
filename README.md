@@ -297,10 +297,10 @@ The generation pipeline rejects known system-prompt signatures and jailbreak-com
 ## Demo Video & Deployment (Bonus B)
 
 ### 📹 Demo Video (30-60 Seconds)
-- **Demo Video Link**: [Watch Demo Video (Loom / YouTube)](https://loom.com/share/placeholder_demo)
+- **Demo Video Link**: [Watch Demo Video (Loom / YouTube)](https://youtu.be/kgwXbHUWmuY)
 
 ### 🌐 Public Endpoint Deployment (Bonus B)
-- **Live Hugging Face Space**: [Live App Demo](https://huggingface.co/spaces/placeholder/challenge_epam_LLM)
+- **Live Hugging Face Space**: [Live App Demo](https://nggerizo97-challenge-epam-llm-app-putdhw.streamlit.app/)
 
 ---
 
