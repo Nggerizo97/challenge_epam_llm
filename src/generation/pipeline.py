@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import logging
+from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import List, Tuple
 
@@ -19,12 +20,48 @@ class APIRequestLimitExceeded(Exception):
     """Raised when this process has exhausted its paid inference budget."""
 
 
+def _get_dynamodb_client():
+    import boto3
+
+    return boto3.client(
+        "dynamodb",
+        region_name=settings.aws_region,
+        aws_access_key_id=settings.aws_access_key_id or None,
+        aws_secret_access_key=settings.aws_secret_access_key or None,
+    )
+
+
+def _reserve_persistent_api_request(table_name: str, max_requests: int, now: datetime | None = None) -> None:
+    """Atomically reserve one monthly provider call in DynamoDB."""
+    from botocore.exceptions import ClientError
+
+    now = now or datetime.now(timezone.utc)
+    try:
+        _get_dynamodb_client().update_item(
+            TableName=table_name,
+            Key={"quota_key": {"S": f"llm-calls#{now:%Y-%m}"}},
+            UpdateExpression="ADD request_count :one SET expires_at = if_not_exists(expires_at, :expires_at)",
+            ConditionExpression="attribute_not_exists(request_count) OR request_count < :limit",
+            ExpressionAttributeValues={
+                ":one": {"N": "1"},
+                ":limit": {"N": str(max_requests)},
+                ":expires_at": {"N": str(int((now + timedelta(days=40)).timestamp()))},
+            },
+        )
+    except ClientError as error:
+        if error.response["Error"].get("Code") == "ConditionalCheckFailedException":
+            raise APIRequestLimitExceeded("The persistent API request limit has been reached.") from error
+        raise RuntimeError("The persistent API quota could not be reserved.") from error
+
+
 def _invoke_llm(llm, prompt: str):
     """Reserve one provider call atomically before performing it."""
     global _api_request_count
     with _api_request_lock:
         if _api_request_count >= settings.max_api_requests:
             raise APIRequestLimitExceeded("The configured API request limit has been reached.")
+        if settings.dynamodb_quota_table:
+            _reserve_persistent_api_request(settings.dynamodb_quota_table, settings.max_api_requests)
         _api_request_count += 1
     return llm.invoke(prompt)
 

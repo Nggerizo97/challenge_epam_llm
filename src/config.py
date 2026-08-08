@@ -25,6 +25,8 @@ class Settings:
     max_question_chars: int = int(os.getenv("MAX_QUESTION_CHARS", "2000"))
     # Per-process provider invocation budget. It can be reduced, never raised above 20.
     max_api_requests: int = min(max(int(os.getenv("MAX_API_REQUESTS", "5")), 1), 20)
+    # When configured, DynamoDB enforces the same quota across restarts and replicas.
+    dynamodb_quota_table: str = os.getenv("DYNAMODB_QUOTA_TABLE", "")
 
     # Groq Fallback Settings
     groq_api_key: str = os.getenv("GROQ_API_KEY", "")

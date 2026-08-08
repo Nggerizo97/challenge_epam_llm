@@ -225,6 +225,18 @@ python ingest.py --no-scrape
 streamlit run app.py
 ```
 
+### 6.1) Persistent Cloud Cost Limit
+For a deployment that must keep its quota after a Streamlit restart, apply the Terraform configuration in `infra/`. It creates a DynamoDB counter, an IAM user restricted to the configured Bedrock models and that counter, and an optional Bedrock-only Budget alert.
+
+```bash
+cd infra
+cp terraform.tfvars.example terraform.tfvars
+terraform init
+terraform apply
+```
+
+Create an access key for the `streamlit_iam_user` Terraform output and store it only in Streamlit Cloud Secrets. Set `DYNAMODB_QUOTA_TABLE` to the `dynamodb_quota_table` output and keep `MAX_API_REQUESTS=5`. The app atomically reserves each provider call in DynamoDB per UTC month; once the limit is reached, all replicas and restarts abstain before calling a provider. Budgets are alerts, not enforcement.
+
 ### 7) Run Automated RAGAS Benchmark Evaluation (Bonus A)
 ```bash
 python -m src.evaluation.run_eval

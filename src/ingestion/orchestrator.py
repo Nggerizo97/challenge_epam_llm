@@ -27,12 +27,13 @@ logging.basicConfig(
 logger = logging.getLogger("IngestionOrchestrator")
 
 
-def run_pipeline(run_scrapers: bool = True) -> Dict[str, Any]:
+def run_pipeline(run_scrapers: bool = True, target_dir: str = None) -> Dict[str, Any]:
     """
     Run full end-to-end ingestion pipeline.
     
     Args:
         run_scrapers: If True, executes all registered scrapers before vector store indexing.
+        target_dir: Optional custom raw data directory for indexing.
     """
     logger.info("==================================================")
     logger.info("       STARTING INGESTION PIPELINE ORCHESTRATOR    ")
@@ -55,7 +56,8 @@ def run_pipeline(run_scrapers: bool = True) -> Dict[str, Any]:
 
     # Build Vector Store
     logger.info("\n--- Building / Updating ChromaDB Vector Store ---")
-    indexed_chunks = build_vector_store()
+    indexed_chunks = build_vector_store(target_dir=target_dir)
+
 
     summary = {
         "scrapers_executed": len(ACTIVE_SCRAPERS) if run_scrapers else 0,

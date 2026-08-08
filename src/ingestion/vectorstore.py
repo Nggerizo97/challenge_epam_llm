@@ -22,14 +22,20 @@ from src.config import settings
 logger = logging.getLogger("VectorStoreBuilder")
 
 
-def build_vector_store() -> int:
+def build_vector_store(target_dir: str = None) -> int:
     """Build and persist local ChromaDB vector index from raw data files."""
-    data_path = Path(settings.data_dir)
-    if not data_path.exists():
-        raise FileNotFoundError(f"Data directory not found: {data_path}")
+    selected_dir = target_dir or settings.data_dir
+    data_path = Path(selected_dir)
+
+    if not data_path.exists() or not list(data_path.glob("**/*")):
+        fallback_sample = Path("./data/raw_sample")
+        if fallback_sample.exists():
+            logger.info(f"Directory {data_path} empty or missing. Falling back to sample directory: {fallback_sample.resolve()}")
+            data_path = fallback_sample
 
     logger.info(f"Scanning raw documents in: {data_path.resolve()}")
     docs = []
+
 
     # 1. Plain Text Files (.txt)
     txt_loader = DirectoryLoader(

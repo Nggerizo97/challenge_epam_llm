@@ -1,4 +1,8 @@
 import unittest
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
+
+from botocore.exceptions import ClientError
 
 from src.config import settings
 from src.generation import pipeline
@@ -14,6 +18,33 @@ class GenerationQuotaTests(unittest.TestCase):
                 pipeline._invoke_llm(_SuccessfulLLM(), "prompt")
         finally:
             pipeline._api_request_count = original_count
+
+    @patch("src.generation.pipeline._get_dynamodb_client")
+    def test_persistent_quota_uses_conditional_increment(self, get_client):
+        now = datetime(2026, 8, 7, tzinfo=timezone.utc)
+
+        pipeline._reserve_persistent_api_request("quota-table", 5, now)
+
+        get_client.return_value.update_item.assert_called_once_with(
+            TableName="quota-table",
+            Key={"quota_key": {"S": "llm-calls#2026-08"}},
+            UpdateExpression="ADD request_count :one SET expires_at = if_not_exists(expires_at, :expires_at)",
+            ConditionExpression="attribute_not_exists(request_count) OR request_count < :limit",
+            ExpressionAttributeValues={
+                ":one": {"N": "1"},
+                ":limit": {"N": "5"},
+                ":expires_at": {"N": str(int((now + timedelta(days=40)).timestamp()))},
+            },
+        )
+
+    @patch("src.generation.pipeline._get_dynamodb_client")
+    def test_persistent_quota_rejects_an_exhausted_month(self, get_client):
+        get_client.return_value.update_item.side_effect = ClientError(
+            {"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem"
+        )
+
+        with self.assertRaises(pipeline.APIRequestLimitExceeded):
+            pipeline._reserve_persistent_api_request("quota-table", 5)
 
 
 class _SuccessfulLLM:
