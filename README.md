@@ -14,7 +14,7 @@ The system analyzes, ingests, and queries public socioeconomic open data, foreig
 ### Key System Highlights
 - **100% Automated Multi-Format Web Scraper**: Dynamically crawls portal HTML pages and queries Socrata REST APIs (`datos.gov.co`, DANE, ANM, MinAmbiente, Banco de la República) without hardcoded static URLs.
 - **Enterprise-Scale Vector Store**: 144,602 text & document chunks indexed in ChromaDB with `sentence-transformers/all-MiniLM-L6-v2`.
-- **AWS Bedrock Cost Guardrails**: Deterministic inference using Meta Llama 3 70B (`meta.llama3-70b-instruct-v1:0`) with hard token ceilings (`max_tokens: 512`, `temperature: 0.0`, `top_p: 0.9`).
+- **AWS Bedrock Cost Guardrails**: Deterministic inference using Meta Llama 3 70B (`meta.llama3-70b-instruct-v1:0`) with hard token ceilings (`max_tokens: 512`, `temperature: 0.0`, `top_p: 0.9`) and a process-wide cap of five paid provider calls by default.
 - **Strict Anti-Hallucination & Red-Teaming Immunity**: Rejects manipulative prompt injections, spin requests, or alarmist reframing. Requires inline source citations (`[Source 1]`, `[Source 2]`) and abstains with:
   > *"I do not know based on the provided documents."*
 
@@ -204,6 +204,7 @@ AWS_ACCESS_KEY_ID=your_aws_access_key
 AWS_SECRET_ACCESS_KEY=your_aws_secret_key
 AWS_DEFAULT_REGION=us-east-1
 AWS_BEDROCK_MODEL_ID=meta.llama3-70b-instruct-v1:0
+MAX_API_REQUESTS=5  # 1-20; total paid provider calls per running app process
 
 # Fallback Groq key (optional)
 GROQ_API_KEY=your_groq_api_key

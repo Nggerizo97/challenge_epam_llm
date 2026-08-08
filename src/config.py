@@ -21,6 +21,10 @@ class Settings:
     temperature: float = float(os.getenv("TEMPERATURE", "0.0"))
     max_tokens: int = int(os.getenv("MAX_TOKENS", "512"))
     top_p: float = float(os.getenv("TOP_P", "0.9"))
+    # Reject over-length questions before embedding/LLM to cap cost and abuse.
+    max_question_chars: int = int(os.getenv("MAX_QUESTION_CHARS", "2000"))
+    # Per-process provider invocation budget. It can be reduced, never raised above 20.
+    max_api_requests: int = min(max(int(os.getenv("MAX_API_REQUESTS", "5")), 1), 20)
 
     # Groq Fallback Settings
     groq_api_key: str = os.getenv("GROQ_API_KEY", "")
