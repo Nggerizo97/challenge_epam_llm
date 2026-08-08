@@ -103,9 +103,13 @@ def get_bedrock_llm(model_id: str = settings.bedrock_model_id):
 
     return ChatBedrock(
         model_id=model_id,
+        # max_tokens MUST be a top-level argument, not a model_kwargs entry: langchain-aws
+        # translates it to the provider's real cap (max_gen_len for Llama/meta,
+        # maxTokenCount for Titan/amazon). Inside model_kwargs it is forwarded verbatim
+        # as an unknown key, silently ignored by Bedrock, leaving output uncapped.
+        max_tokens=settings.max_tokens,
         model_kwargs={
             "temperature": settings.temperature,
-            "max_tokens": settings.max_tokens,
             "top_p": settings.top_p,
         },
         region_name=settings.aws_region,
@@ -165,6 +169,10 @@ def generate_answer(question: str, context_docs: List[Document]) -> Tuple[str, L
     Enforces cost guardrails and anti-hallucination citation checks.
     """
     ABSTAIN_MSG = "I do not know based on the provided documents."
+    QUOTA_MSG = (
+        "This demo has reached its monthly request budget. "
+        "Please try again after the budget resets."
+    )
 
     if not context_docs:
         logger.info("No context documents retrieved. Abstaining.")
@@ -179,18 +187,27 @@ def generate_answer(question: str, context_docs: List[Document]) -> Tuple[str, L
         llm = get_bedrock_llm(settings.bedrock_model_id)
         response = _invoke_llm(llm, prompt)
         answer_text = response.content.strip() if hasattr(response, "content") else str(response).strip()
+    except APIRequestLimitExceeded:
+        # The quota gates every provider, so falling back would only fail again.
+        # Surface a distinct message: silently reusing ABSTAIN_MSG here makes an
+        # exhausted budget indistinguishable from a genuine "not in the documents".
+        logger.warning("Request budget exhausted; refusing further provider calls.")
+        return QUOTA_MSG, []
     except Exception as primary_err:
         logger.warning(f"AWS Bedrock Primary Model ({settings.bedrock_model_id}) failed: {primary_err}")
-        
+
         # 2. Attempt Fallback AWS Bedrock Model (Llama 3 70B)
         try:
             logger.info(f"Invoking Fallback AWS Bedrock Model: {settings.bedrock_fallback_model_id}")
             llm = get_bedrock_llm(settings.bedrock_fallback_model_id)
             response = _invoke_llm(llm, prompt)
             answer_text = response.content.strip() if hasattr(response, "content") else str(response).strip()
+        except APIRequestLimitExceeded:
+            logger.warning("Request budget exhausted during fallback; stopping.")
+            return QUOTA_MSG, []
         except Exception as fallback_err:
             logger.warning(f"AWS Bedrock Fallback Model failed: {fallback_err}")
-            
+
             # 3. Attempt Groq API Fallback if available
             if settings.groq_api_key:
                 try:
