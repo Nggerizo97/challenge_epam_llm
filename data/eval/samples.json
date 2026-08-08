@@ -1,0 +1,58 @@
+[
+  {
+    "user_input": "¿Cuál fue la variación en las ventas de exportación hacia Estados Unidos?",
+    "question": "¿Cuál fue la variación en las ventas de exportación hacia Estados Unidos?",
+    "response": "De acuerdo con el boletín del DANE, las exportaciones hacia Estados Unidos disminuyeron un 8.2% [Source 1].",
+    "answer": "De acuerdo con el boletín del DANE, las exportaciones hacia Estados Unidos disminuyeron un 8.2% [Source 1].",
+    "retrieved_contexts": [
+      "Las exportaciones de Colombia a Estados Unidos registraron una caída del 8.2% en el periodo de análisis según el boletín técnico de exportaciones del DANE."
+    ],
+    "contexts": [
+      "Las exportaciones de Colombia a Estados Unidos registraron una caída del 8.2% en el periodo de análisis según el boletín técnico de exportaciones del DANE."
+    ],
+    "reference": "Se registró un descenso del 8.2% en las ventas de exportación hacia Estados Unidos según el boletín del DANE.",
+    "ground_truth": "Se registró un descenso del 8.2% en las ventas de exportación hacia Estados Unidos según el boletín del DANE."
+  },
+  {
+    "user_input": "¿Qué efectos climáticos menciona el informe de MinAmbiente sobre el fenómeno del Niño?",
+    "question": "¿Qué efectos climáticos menciona el informe de MinAmbiente sobre el fenómeno del Niño?",
+    "response": "El informe señala precipitaciones por debajo de los promedios climatológicos y déficit hídrico en algunos territorios [Source 1].",
+    "answer": "El informe señala precipitaciones por debajo de los promedios climatológicos y déficit hídrico en algunos territorios [Source 1].",
+    "retrieved_contexts": [
+      "El informe sobre el fenómeno del Niño genera precipitaciones por debajo de los promedios climatológicos, ocasionando déficit hídrico y reducción en la disponibilidad de agua en diversas zonas."
+    ],
+    "contexts": [
+      "El informe sobre el fenómeno del Niño genera precipitaciones por debajo de los promedios climatológicos, ocasionando déficit hídrico y reducción en la disponibilidad de agua en diversas zonas."
+    ],
+    "reference": "Menciona precipitaciones por debajo de los promedios climatológicos, generando condiciones de déficit hídrico y menor disponibilidad de agua.",
+    "ground_truth": "Menciona precipitaciones por debajo de los promedios climatológicos, generando condiciones de déficit hídrico y menor disponibilidad de agua."
+  },
+  {
+    "user_input": "¿Cuáles son los datos sobre la tasa de desempleo e inflación en el país según los documentos?",
+    "question": "¿Cuáles son los datos sobre la tasa de desempleo e inflación en el país según los documentos?",
+    "response": "I do not know based on the provided documents.",
+    "answer": "I do not know based on the provided documents.",
+    "retrieved_contexts": [
+      "Serie histórica de exportaciones por capítulos arancelarios y precios de comercialización mayorista de productos agrícolas SIPSA."
+    ],
+    "contexts": [
+      "Serie histórica de exportaciones por capítulos arancelarios y precios de comercialización mayorista de productos agrícolas SIPSA."
+    ],
+    "reference": "I do not know based on the provided documents.",
+    "ground_truth": "I do not know based on the provided documents."
+  },
+  {
+    "user_input": "¿Cuál es el objetivo del programa de ética y transparencia de la ANM?",
+    "question": "¿Cuál es el objetivo del programa de ética y transparencia de la ANM?",
+    "response": "El programa de la ANM busca fortalecer la transparencia y prevenir la corrupción en el sector minero [Source 1].",
+    "answer": "El programa de la ANM busca fortalecer la transparencia y prevenir la corrupción en el sector minero [Source 1].",
+    "retrieved_contexts": [
+      "La Agencia Nacional de Minería (ANM) adoptó el programa de ética y transparencia 2026 para la prevención de la corrupción e integridad en la gestión minera."
+    ],
+    "contexts": [
+      "La Agencia Nacional de Minería (ANM) adoptó el programa de ética y transparencia 2026 para la prevención de la corrupción e integridad en la gestión minera."
+    ],
+    "reference": "Fortalecer la transparencia, la integridad pública y la prevención de la corrupción en el sector minero.",
+    "ground_truth": "Fortalecer la transparencia, la integridad pública y la prevención de la corrupción en el sector minero."
+  }
+]

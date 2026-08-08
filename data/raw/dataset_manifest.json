@@ -1,0 +1,20 @@
+[
+  {
+    "id": "jbjy-vk9h",
+    "title": "SECOP II - Contratos Electrónicos",
+    "category": "Macroeconomics & Banking",
+    "query": "Tasas de interes",
+    "file_path": "data\\raw\\jbjy-vk9h_secop_ii_contratos_electrónicos.csv",
+    "file_size_kb": 9226465.233398438,
+    "downloaded_at": "2026-08-07T21:12:50Z"
+  },
+  {
+    "id": "gt2j-8ykr",
+    "title": "Casos positivos de COVID-19 en Colombia.",
+    "category": "Macroeconomics & Banking",
+    "query": "Tasas de interes",
+    "file_path": "data\\raw\\gt2j-8ykr_casos_positivos_de_covid_19_en_colombia.csv",
+    "file_size_kb": 1153826.4169921875,
+    "downloaded_at": "2026-08-07T21:33:24Z"
+  }
+]
