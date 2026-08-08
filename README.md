@@ -164,6 +164,28 @@ The ingestion engine extracts data from official Colombian open portals:
    - Environmental calendar and national policies.
 5. **Banco de la República de Colombia**: Macroeconomic and monetary policy indicators.
 
+### Corpus Scope: Full Pipeline vs. Deployed Demo
+
+This repository intentionally ships **two corpus tiers**, because the complete ingested
+dataset cannot be version-controlled:
+
+| Tier | Location | Contents |
+|---|---|---|
+| **Full ingested corpus** | `data/raw/` (git-ignored) | **21 source files** harvested by the automated scrapers across the 5 institutions above. **15 of them are fully documented** — with `source_url`, category, byte size and download timestamp — in the committed manifests `data/raw/dataset_manifest.json` and `data/raw/automated_scraper_manifest.json`. |
+| **Deployed demo corpus** | `data/raw_sample/` (committed, 2.6 MB) | **8 documents**: 5 real institutional sources (DANE export bulletin, DANE foreign-trade glossary, SIPSA price bulletin, Banco de la República TIBC rate series, MinAmbiente El Niño report) plus 3 curated topical summaries. |
+
+**Why the full corpus is not committed.** Three of the ingested datasets exceed what Git can
+reasonably hold — SECOP II electronic contracts (**9.2 GB**), COVID-19 positive cases
+(**1.1 GB**) and the historical active interest-rate series (**494 MB**). GitHub enforces a
+hard 100 MB per-file limit, and the generated Chroma index is a further **860 MB**. Committing
+them would be poor repository hygiene, so the scrapers and their manifests are committed
+instead, which keeps the pipeline fully reproducible.
+
+**Reproducing the full corpus** is a single command — `python ingest.py` re-runs the scrapers
+and rebuilds the complete vector store locally (see step 5 of the Quickstart). On Streamlit
+Cloud, where no index is present, the app bootstraps automatically from `data/raw_sample/`
+at first launch, so the public demo answers from the 8 committed documents.
+
 ---
 
 ## Local Setup & Quickstart
