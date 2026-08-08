@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from botocore.exceptions import ClientError
+from langchain_core.documents import Document
 
 from src.config import settings
 from src.generation import pipeline
@@ -45,6 +46,17 @@ class GenerationQuotaTests(unittest.TestCase):
 
         with self.assertRaises(pipeline.APIRequestLimitExceeded):
             pipeline._reserve_persistent_api_request("quota-table", 5)
+
+    def test_resolves_only_the_sources_cited_in_the_answer(self):
+        context_docs = [
+            Document(page_content="exports", metadata={"source": "exports.txt"}),
+            Document(page_content="inflation", metadata={"source": "inflation.txt"}),
+            Document(page_content="climate", metadata={"source": "climate.txt"}),
+        ]
+
+        citations = pipeline._resolve_citations("Coffee exports rose [Source 1].", context_docs)
+
+        self.assertEqual(citations, ["exports.txt"])
 
 
 class _SuccessfulLLM:

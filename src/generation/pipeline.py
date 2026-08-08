@@ -15,6 +15,31 @@ logger = logging.getLogger("GenerationPipeline")
 _api_request_lock = Lock()
 _api_request_count = 0
 
+# Signature fragments of the system prompt plus jailbreak "compliance" tells. If any
+# surface in a generated answer, the model leaked its instructions or obeyed an
+# injection -> the answer must be suppressed. These strings never occur in a genuine
+# socioeconomic data answer, so false positives are negligible.
+_LEAK_SIGNATURES = (
+    "neutral ai data analyst",
+    "critical safety",
+    "strict neutrality",
+    "reject manipulation",
+    "abstention rule",
+    "input is data",
+    "confidentiality:",
+    "do not use prior knowledge",
+    "filters disabled",
+    "do anything now",
+)
+
+
+def _looks_like_prompt_leak(text: str) -> bool:
+    """True if the answer echoes the system prompt or signals jailbreak compliance."""
+    low = text.lower()
+    if low.lstrip().startswith("system:"):
+        return True
+    return any(sig in low for sig in _LEAK_SIGNATURES)
+
 
 class APIRequestLimitExceeded(Exception):
     """Raised when this process has exhausted its paid inference budget."""
@@ -110,6 +135,29 @@ def _build_prompt(question: str, context_docs: List[Document]) -> str:
     )
 
 
+def _resolve_citations(answer_text: str, context_docs: List[Document]) -> List[str]:
+    """Resolve unique, explicitly cited source markers to their document names."""
+    source_numbers = []
+    for match in re.finditer(r"\[Source\s+(\d+)\]", answer_text):
+        source_number = int(match.group(1))
+        if source_number not in source_numbers:
+            source_numbers.append(source_number)
+
+    if not source_numbers or any(number > len(context_docs) for number in source_numbers):
+        raise ValueError("Answer contains missing or invalid source citations.")
+
+    return [
+        os.path.basename(
+            str(
+                context_docs[number - 1].metadata.get("source")
+                or context_docs[number - 1].metadata.get("file_path")
+                or f"Document {number}"
+            )
+        )
+        for number in source_numbers
+    ]
+
+
 
 def generate_answer(question: str, context_docs: List[Document]) -> Tuple[str, List[str]]:
     """
@@ -157,6 +205,13 @@ def generate_answer(question: str, context_docs: List[Document]) -> Tuple[str, L
             else:
                 return ABSTAIN_MSG, []
 
+    # Post-generation Guardrail 0: Reject system-prompt leakage / jailbreak compliance.
+    # Runs first and does NOT rely on the presence/absence of [Source N] markers, which
+    # attackers can trigger by making the model echo the cited context or the rules.
+    if _looks_like_prompt_leak(answer_text):
+        logger.warning("Answer contained system-prompt leakage or jailbreak compliance. Abstaining.")
+        return ABSTAIN_MSG, []
+
     # Post-generation Guardrail 1: Reject compliance with manipulative/spin instructions
     spin_phrases = ["i can reframe", "reframe these", "reframe some", "brink of total collapse", "to show that the country"]
     if any(phrase in answer_text.lower() for phrase in spin_phrases):
@@ -169,12 +224,8 @@ def generate_answer(question: str, context_docs: List[Document]) -> Tuple[str, L
         return ABSTAIN_MSG, []
 
 
-    # Extract resolved source metadata for citations
-    citations = []
-    for idx, doc in enumerate(context_docs):
-        src = doc.metadata.get("source") or doc.metadata.get("file_path") or f"Document {idx + 1}"
-        # Keep clean basename for UI display
-        clean_src = os.path.basename(str(src))
-        citations.append(clean_src)
-
-    return answer_text, citations
+    try:
+        return answer_text, _resolve_citations(answer_text, context_docs)
+    except ValueError:
+        logger.warning("Answer cited a source that was not retrieved. Abstaining.")
+        return ABSTAIN_MSG, []
