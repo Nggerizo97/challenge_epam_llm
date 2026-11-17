@@ -16,7 +16,9 @@ from src.config import settings
 def aws_client(service_name: str):
     import boto3
 
-    return boto3.client(
+    # A fresh boto3 session (not boto3's process-wide default) so that clearing this
+    # cache also re-reads credentials: the emulator issues new keys on every start.
+    return boto3.session.Session().client(
         service_name,
         region_name=settings.aws_region,
         endpoint_url=settings.aws_endpoint_url or None,
