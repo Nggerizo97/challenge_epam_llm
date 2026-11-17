@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from src.config import settings
-from src.generation.pipeline import generate_answer
+from src.generation.pipeline import TokenBudget, generate_answer
 from src.retrieval.pipeline import retrieve_context
 
 logger = logging.getLogger("ChatUIBackend")
@@ -21,9 +21,11 @@ def _empty_result(question: str, answer: str) -> Dict[str, Any]:
     }
 
 
-def answer_question(question: str) -> Dict[str, Any]:
+def answer_question(question: str, budget: Optional[TokenBudget] = None) -> Dict[str, Any]:
     """
-    Retrieve context documents and generate grounded answer with citations using AWS Bedrock.
+    Retrieve context documents and generate grounded answer with citations.
+
+    ``budget`` is the signed-in user's session token budget; LLM calls are charged to it.
 
     Applies input-length guardrails and fails closed: on any pipeline error the user
     gets a generic message, never a stack trace.
@@ -46,7 +48,7 @@ def answer_question(question: str) -> Dict[str, Any]:
     logger.info("Processing question (%d chars): %.120r", len(question), question)
     try:
         context_docs = retrieve_context(question)
-        answer, citations = generate_answer(question, context_docs)
+        answer, citations = generate_answer(question, context_docs, budget)
     except Exception:
         logger.exception("Answer pipeline failed.")
         return _empty_result(

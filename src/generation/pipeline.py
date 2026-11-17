@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import math
 import os
 import re
 import logging
 from datetime import datetime, timedelta, timezone
 from threading import Lock
-from typing import List, Tuple
+from typing import Callable, List, Optional, Protocol, Tuple
 
 from langchain_core.documents import Document
 from src.config import settings
@@ -45,15 +46,39 @@ class APIRequestLimitExceeded(Exception):
     """Raised when this process has exhausted its paid inference budget."""
 
 
-def _get_dynamodb_client():
-    import boto3
+class TokenBudget(Protocol):
+    """Per-session token budget (see src.auth.sessions.SessionTokenBudget)."""
 
-    return boto3.client(
-        "dynamodb",
-        region_name=settings.aws_region,
-        aws_access_key_id=settings.aws_access_key_id or None,
-        aws_secret_access_key=settings.aws_secret_access_key or None,
-    )
+    def reserve(self, tokens: int) -> None:
+        """Reserve tokens before a call; raise SessionTokenLimitExceeded if over budget."""
+
+    def settle(self, reserved: int, actual: int) -> None:
+        """Replace a reservation with the tokens the call really used."""
+
+
+def _get_dynamodb_client():
+    from src.aws.clients import aws_client
+
+    return aws_client("dynamodb")
+
+
+def estimate_prompt_tokens(prompt: str) -> int:
+    """Upper-bound token estimate for a prompt (about 3 characters per token).
+
+    Real tokenizers average about 4 characters per token for this corpus, so this
+    over-reserves slightly; the surplus is returned after the call.
+    """
+    return math.ceil(len(prompt) / 3)
+
+
+def _tokens_used(response, prompt: str) -> int:
+    """Tokens billed for a call, as reported by the provider, else a conservative estimate."""
+    usage = getattr(response, "usage_metadata", None) or {}
+    total = usage.get("total_tokens") or (usage.get("input_tokens", 0) + usage.get("output_tokens", 0))
+    if total:
+        return int(total)
+    content = getattr(response, "content", "") or ""
+    return estimate_prompt_tokens(prompt) + estimate_prompt_tokens(str(content))
 
 
 def _reserve_persistent_api_request(table_name: str, max_requests: int, now: datetime | None = None) -> None:
@@ -79,16 +104,32 @@ def _reserve_persistent_api_request(table_name: str, max_requests: int, now: dat
         raise RuntimeError("The persistent API quota could not be reserved.") from error
 
 
-def _invoke_llm(llm, prompt: str):
-    """Reserve one provider call atomically before performing it."""
+def _invoke_llm(llm, prompt: str, budget: Optional[TokenBudget] = None):
+    """Reserve session tokens and one provider call atomically before performing it.
+
+    The session budget is reserved first, so a session that is out of tokens never
+    consumes the global call quota. The worst case (prompt + max output tokens) is
+    reserved, then corrected to the real usage once the provider answers.
+    """
     global _api_request_count
-    with _api_request_lock:
-        if _api_request_count >= settings.max_api_requests:
-            raise APIRequestLimitExceeded("The configured API request limit has been reached.")
-        if settings.dynamodb_quota_table:
-            _reserve_persistent_api_request(settings.dynamodb_quota_table, settings.max_api_requests)
-        _api_request_count += 1
-    return llm.invoke(prompt)
+    reserved = estimate_prompt_tokens(prompt) + settings.max_tokens if budget else 0
+    if budget:
+        budget.reserve(reserved)
+    try:
+        with _api_request_lock:
+            if _api_request_count >= settings.max_api_requests:
+                raise APIRequestLimitExceeded("The configured API request limit has been reached.")
+            if settings.dynamodb_quota_table:
+                _reserve_persistent_api_request(settings.dynamodb_quota_table, settings.max_api_requests)
+            _api_request_count += 1
+        response = llm.invoke(prompt)
+    except Exception:
+        if budget:
+            budget.settle(reserved, 0)  # nothing was generated: give the tokens back
+        raise
+    if budget:
+        budget.settle(reserved, _tokens_used(response, prompt))
+    return response
 
 
 def get_bedrock_llm(model_id: str = settings.bedrock_model_id):
@@ -163,16 +204,47 @@ def _resolve_citations(answer_text: str, context_docs: List[Document]) -> List[s
 
 
 
-def generate_answer(question: str, context_docs: List[Document]) -> Tuple[str, List[str]]:
+def get_groq_llm():
+    from langchain_groq import ChatGroq
+
+    return ChatGroq(
+        model=settings.groq_model,
+        api_key=settings.groq_api_key,
+        temperature=0.0,
+        max_tokens=settings.max_tokens,
+    )
+
+
+def _provider_chain() -> List[Tuple[str, Callable[[], object]]]:
+    """Providers to try in order, according to LLM_PROVIDER."""
+    chain: List[Tuple[str, Callable[[], object]]] = []
+    if settings.llm_provider == "bedrock":
+        chain.append((f"bedrock:{settings.bedrock_model_id}", lambda: get_bedrock_llm(settings.bedrock_model_id)))
+        chain.append(
+            (f"bedrock:{settings.bedrock_fallback_model_id}", lambda: get_bedrock_llm(settings.bedrock_fallback_model_id))
+        )
+    if settings.groq_api_key:
+        chain.append((f"groq:{settings.groq_model}", get_groq_llm))
+    return chain
+
+
+def generate_answer(
+    question: str, context_docs: List[Document], budget: Optional[TokenBudget] = None
+) -> Tuple[str, List[str]]:
     """
-    Generate grounded answer using AWS Bedrock (Claude 3 Sonnet / Fallback models).
+    Generate a grounded answer with the configured provider chain.
+
+    Every provider call is charged to ``budget`` (the user's session) when given.
     Enforces cost guardrails and anti-hallucination citation checks.
     """
+    from src.auth.sessions import SessionTokenLimitExceeded
+
     ABSTAIN_MSG = "I do not know based on the provided documents."
     QUOTA_MSG = (
         "This demo has reached its monthly request budget. "
         "Please try again after the budget resets."
     )
+    SESSION_LIMIT_MSG = "You have used all the tokens available for this session."
 
     if not context_docs:
         logger.info("No context documents retrieved. Abstaining.")
@@ -181,46 +253,31 @@ def generate_answer(question: str, context_docs: List[Document]) -> Tuple[str, L
     prompt = _build_prompt(question, context_docs)
     answer_text = ""
 
-    # 1. Attempt Primary AWS Bedrock Model (Claude 3 Sonnet)
-    try:
-        logger.info(f"Invoking Primary AWS Bedrock Model: {settings.bedrock_model_id}")
-        llm = get_bedrock_llm(settings.bedrock_model_id)
-        response = _invoke_llm(llm, prompt)
-        answer_text = response.content.strip() if hasattr(response, "content") else str(response).strip()
-    except APIRequestLimitExceeded:
-        # The quota gates every provider, so falling back would only fail again.
-        # Surface a distinct message: silently reusing ABSTAIN_MSG here makes an
-        # exhausted budget indistinguishable from a genuine "not in the documents".
-        logger.warning("Request budget exhausted; refusing further provider calls.")
-        return QUOTA_MSG, []
-    except Exception as primary_err:
-        logger.warning(f"AWS Bedrock Primary Model ({settings.bedrock_model_id}) failed: {primary_err}")
+    providers = _provider_chain()
+    if not providers:
+        logger.error("No LLM provider is configured (LLM_PROVIDER=%s, GROQ_API_KEY unset).", settings.llm_provider)
+        return ABSTAIN_MSG, []
 
-        # 2. Attempt Fallback AWS Bedrock Model (Llama 3 70B)
+    for name, build_llm in providers:
         try:
-            logger.info(f"Invoking Fallback AWS Bedrock Model: {settings.bedrock_fallback_model_id}")
-            llm = get_bedrock_llm(settings.bedrock_fallback_model_id)
-            response = _invoke_llm(llm, prompt)
+            logger.info("Invoking LLM provider %s", name)
+            response = _invoke_llm(build_llm(), prompt, budget)
             answer_text = response.content.strip() if hasattr(response, "content") else str(response).strip()
+            break
+        except SessionTokenLimitExceeded:
+            logger.info("Session token budget exhausted; refusing the call.")
+            return SESSION_LIMIT_MSG, []
         except APIRequestLimitExceeded:
-            logger.warning("Request budget exhausted during fallback; stopping.")
+            # The quota gates every provider, so falling back would only fail again.
+            # Surface a distinct message: silently reusing ABSTAIN_MSG here makes an
+            # exhausted budget indistinguishable from a genuine "not in the documents".
+            logger.warning("Request budget exhausted; refusing further provider calls.")
             return QUOTA_MSG, []
-        except Exception as fallback_err:
-            logger.warning(f"AWS Bedrock Fallback Model failed: {fallback_err}")
-
-            # 3. Attempt Groq API Fallback if available
-            if settings.groq_api_key:
-                try:
-                    logger.info("Attempting Groq API Fallback...")
-                    from langchain_groq import ChatGroq
-                    llm = ChatGroq(model=settings.groq_model, api_key=settings.groq_api_key, temperature=0.0)
-                    response = _invoke_llm(llm, prompt)
-                    answer_text = response.content.strip()
-                except Exception as groq_err:
-                    logger.error(f"Groq API Fallback also failed: {groq_err}")
-                    return ABSTAIN_MSG, []
-            else:
-                return ABSTAIN_MSG, []
+        except Exception as provider_err:
+            logger.warning("LLM provider %s failed: %s", name, provider_err)
+    else:
+        logger.error("All LLM providers failed.")
+        return ABSTAIN_MSG, []
 
     # Post-generation Guardrail 0: Reject system-prompt leakage / jailbreak compliance.
     # Runs first and does NOT rely on the presence/absence of [Source N] markers, which
@@ -239,7 +296,6 @@ def generate_answer(question: str, context_docs: List[Document]) -> Tuple[str, L
     if not re.search(r"\[Source\s+\d+\]", answer_text):
         logger.warning("Answer generated without required inline [Source N] citations. Abstaining per guardrail policy.")
         return ABSTAIN_MSG, []
-
 
     try:
         return answer_text, _resolve_citations(answer_text, context_docs)
