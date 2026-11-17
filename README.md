@@ -123,6 +123,9 @@ challenge_epam_LLM/
 ├── requirements.txt                  # Python dependencies
 ├── README.md                         # Project documentation
 ├── .env.example                      # Environment variables template
+├── scripts/
+│   ├── emulator_env.sh               # Points boto3 / AWS CLI at the AWS Emulator
+│   └── setup_emulator.py             # Creates tables & Cognito pool in the emulator
 ├── data/
 │   ├── raw/                          # Raw scraped documents (.txt, .pdf, .csv)
 │   └── eval/
@@ -139,7 +142,15 @@ challenge_epam_LLM/
     ├── retrieval/
     │   └── pipeline.py               # Vector similarity retrieval pipeline
     ├── generation/
-    │   └── pipeline.py               # AWS Bedrock LLM generation & guardrails
+    │   └── pipeline.py               # LLM generation, guardrails & session token charging
+    ├── auth/
+    │   ├── cognito.py                # Cognito sign-up / sign-in / token validation
+    │   ├── sessions.py               # DynamoDB sessions with per-session token budgets
+    │   ├── rate_limit.py             # Per-IP account-creation limit (DynamoDB)
+    │   └── service.py                # Account & session workflow used by the UI
+    ├── aws/
+    │   ├── clients.py                # boto3 clients (AWS Emulator endpoint aware)
+    │   └── resources.py              # Creates tables & the Cognito user pool
     ├── ui/
     │   └── chat.py                   # Chat backend interface
     └── evaluation/
@@ -247,7 +258,9 @@ python ingest.py --no-scrape
 streamlit run app.py
 ```
 
-### 6.1) Persistent Cloud Cost Limit
+### 6.1) Persistent Cloud Cost Limit (real AWS only)
+> The project now runs Cognito and DynamoDB on the **AWS Emulator** (see 6.2). This Terraform setup only applies if you deploy to a real AWS account.
+
 For a deployment that must keep its quota after a Streamlit restart, apply the Terraform configuration in `infra/`. It creates a DynamoDB counter, an IAM user restricted to the configured Bedrock models and that counter, and an optional Bedrock-only Budget alert.
 
 ```bash
@@ -258,6 +271,44 @@ terraform apply
 ```
 
 Create an access key for the `streamlit_iam_user` Terraform output and store it only in Streamlit Cloud Secrets. Set `DYNAMODB_QUOTA_TABLE` to the `dynamodb_quota_table` output and keep `MAX_API_REQUESTS=5`. The app atomically reserves each provider call in DynamoDB per UTC month; once the limit is reached, all replicas and restarts abstain before calling a provider. Budgets are alerts, not enforcement.
+
+### 6.2) Accounts, Sessions and Abuse Limits on the AWS Emulator
+Users must sign in before they can ask questions. Everything runs locally on the
+[AWS Emulator](https://github.com/aws/aws-emulator) — no AWS account is needed.
+
+| Control | How it works |
+| :--- | :--- |
+| **Cognito sign-up / sign-in** | Users register with an **e-mail or a phone number** (E.164, e.g. `+573001234567`) in a Cognito user pool. Wrong password and unknown user return the same message. |
+| **Session in DynamoDB** | After sign-in a session record (`session_id`, Cognito `sub`, client IP, expiry, `tokens_used`, `token_limit`) is written to the `SESSIONS_TABLE`. Cognito tokens are never stored there. Every question re-validates the session record *and* the Cognito access token (`GetUser`), so expired, signed-out or mismatched sessions are rejected. |
+| **Token limit per session** | Before each LLM call the worst case (`prompt estimate + MAX_TOKENS`) is reserved with an atomic conditional `UpdateItem`; after the call it is corrected to the usage reported by the provider (refunded if the call fails). Once `SESSION_TOKEN_LIMIT` would be exceeded, the provider is not called. |
+| **Account creation per IP** | At most `SIGNUP_LIMIT_PER_IP` accounts (e-mail *or* phone) per client IP per `SIGNUP_WINDOW_SECONDS`, counted atomically in the `RATE_LIMIT_TABLE`. IPv6 clients are limited per `/64`. Sign-ups rejected for invalid input do not count. Behind a reverse proxy, set `TRUSTED_PROXY_HOPS` so the real client IP is read from `X-Forwarded-For`. |
+
+**Run it locally**
+
+1. Install and start the emulator (Linux package or Docker, see the AWS Emulator User Guide):
+   ```bash
+   aws-emulator
+   ```
+2. In another terminal, point the SDK at it and configure the app (`cp .env.example .env`, then set `GROQ_API_KEY`):
+   ```bash
+   source scripts/emulator_env.sh
+   ```
+3. Start the app. With `AWS_AUTO_CREATE_RESOURCES=true` it creates the DynamoDB tables and the Cognito user pool on startup (or run `python -m scripts.setup_emulator` yourself):
+   ```bash
+   streamlit run app.py
+   ```
+
+**Emulator caveats**
+- The emulator keeps all resources in memory: stopping it deletes every account, session and counter.
+- It does not send verification e-mails or SMS, so `COGNITO_AUTO_CONFIRM=true` confirms accounts server-side.
+- It has no language model (Bedrock returns a placeholder text), so use `LLM_PROVIDER=groq`.
+- It is meant for local development and tests, not for a public deployment such as Streamlit Cloud.
+
+**Tests** — `tests/test_auth_emulator.py` runs the full flow against a live emulator and is skipped when none is reachable:
+```bash
+source scripts/emulator_env.sh
+python -m pytest tests
+```
 
 ### 7) Run Automated RAGAS Benchmark Evaluation (Bonus A)
 ```bash
