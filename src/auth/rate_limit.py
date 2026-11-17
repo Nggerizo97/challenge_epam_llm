@@ -1,7 +1,8 @@
-"""Per-client-IP limits backed by DynamoDB (atomic fixed-window counters).
+"""Fixed-window counters backed by DynamoDB, used for abuse limits.
 
-Used to cap how many accounts one IP can create, so a single person cannot mint many
-e-mail / phone accounts to multiply their LLM token budget.
+* account creation per client IP, so one person cannot mint many e-mail / phone
+  accounts to multiply their LLM token budget;
+* failed sign-ins per IP and per account, against password guessing.
 """
 from __future__ import annotations
 
@@ -49,11 +50,14 @@ class DynamoRateLimiter:
         self._table = table_name
         self._clock = clock
 
-    def hit(self, scope: str, subject: str, limit: int, window_seconds: int) -> RateLimitHit:
-        """Count one event for ``subject``; raise RateLimitExceeded if over ``limit``."""
+    def _window(self, scope: str, subject: str, window_seconds: int) -> tuple[str, int, int]:
         now = int(self._clock())
         window_start = now - now % window_seconds
-        key = f"{scope}#{subject}#{window_start}"
+        return f"{scope}#{subject}#{window_start}", window_start, now
+
+    def hit(self, scope: str, subject: str, limit: int, window_seconds: int) -> RateLimitHit:
+        """Count one event for ``subject``; raise RateLimitExceeded if over ``limit``."""
+        key, window_start, now = self._window(scope, subject, window_seconds)
         try:
             self._db.update_item(
                 TableName=self._table,
@@ -80,4 +84,26 @@ class DynamoRateLimiter:
             UpdateExpression="ADD hits :minus_one",
             ConditionExpression="attribute_exists(hits) AND hits > :zero",
             ExpressionAttributeValues={":minus_one": {"N": "-1"}, ":zero": {"N": "0"}},
+        )
+
+    def count(self, scope: str, subject: str, window_seconds: int) -> tuple[int, int]:
+        """Events in the current window and seconds until it resets."""
+        key, window_start, now = self._window(scope, subject, window_seconds)
+        item = self._db.get_item(
+            TableName=self._table, Key={"limit_key": {"S": key}}, ConsistentRead=True
+        ).get("Item")
+        hits = int(item["hits"]["N"]) if item and "hits" in item else 0
+        return hits, window_start + window_seconds - now
+
+    def add(self, scope: str, subject: str, window_seconds: int) -> None:
+        """Record one event without a limit check (e.g. a failed sign-in)."""
+        key, window_start, _ = self._window(scope, subject, window_seconds)
+        self._db.update_item(
+            TableName=self._table,
+            Key={"limit_key": {"S": key}},
+            UpdateExpression="ADD hits :one SET expires_at = if_not_exists(expires_at, :expires_at)",
+            ExpressionAttributeValues={
+                ":one": {"N": "1"},
+                ":expires_at": {"N": str(window_start + window_seconds * 2)},
+            },
         )
