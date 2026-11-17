@@ -25,6 +25,46 @@ def get_auth_service():
     return build_auth_service()
 
 
+def reset_aws_connection() -> None:
+    """Drop cached AWS clients and resources after an infrastructure error.
+
+    The AWS Emulator gets a new certificate and empty state every time it restarts;
+    the next request then reconnects and recreates the tables and the user pool.
+    """
+    from src.aws.clients import aws_client
+
+    aws_client.cache_clear()
+    get_auth_service.clear()
+
+
+_RESTART_ERROR_CODES = {"UnrecognizedClientException", "InvalidSignatureException", "ResourceNotFoundException"}
+
+
+def _is_backend_restart(error: Exception) -> bool:
+    """Errors seen when the emulator restarted: new certificate, new keys, empty state.
+
+    They are raised by the first AWS request of an action, before anything is written,
+    so the action can safely be retried once on a fresh connection.
+    """
+    from botocore.exceptions import ClientError, ConnectionClosedError, EndpointConnectionError, SSLError
+
+    if isinstance(error, (SSLError, EndpointConnectionError, ConnectionClosedError)):
+        return True
+    return isinstance(error, ClientError) and error.response["Error"].get("Code") in _RESTART_ERROR_CODES
+
+
+def call_auth(action):
+    """Run ``action(auth_service)``; after a backend restart, reconnect and retry once."""
+    try:
+        return action(get_auth_service())
+    except Exception as error:
+        if not _is_backend_restart(error):
+            raise
+        logger.warning("Authentication backend changed (%s); reconnecting.", type(error).__name__)
+        reset_aws_connection()
+        return action(get_auth_service())
+
+
 def client_ip() -> str:
     return resolve_client_ip(st.context.ip_address, st.context.headers, settings.trusted_proxy_hops)
 
@@ -44,11 +84,12 @@ def render_auth(auth) -> None:
             password = st.text_input("Password", type="password")
             if st.form_submit_button("Sign in"):
                 try:
-                    result = auth.login(identifier, password, client_ip())
+                    result = call_auth(lambda service: service.login(identifier, password, client_ip()))
                 except AuthError as error:
                     st.error(str(error))
                 except Exception:
                     logger.exception("Sign-in failed.")
+                    reset_aws_connection()
                     st.error("Sign-in is unavailable right now. Please try again.")
                 else:
                     st.session_state["session_id"] = result.session.session_id
@@ -66,11 +107,12 @@ def render_auth(auth) -> None:
             )
             if st.form_submit_button("Create account"):
                 try:
-                    result = auth.register(identifier, password, client_ip())
+                    result = call_auth(lambda service: service.register(identifier, password, client_ip()))
                 except AuthError as error:
                     st.error(str(error))
                 except Exception:
                     logger.exception("Sign-up failed.")
+                    reset_aws_connection()
                     st.error("Sign-up is unavailable right now. Please try again.")
                 else:
                     if result.confirmed:
@@ -85,7 +127,7 @@ def render_auth(auth) -> None:
                 code = st.text_input(f"Confirmation code for {pending}")
                 if st.form_submit_button("Confirm account"):
                     try:
-                        auth.confirm(pending, code)
+                        call_auth(lambda service: service.confirm(pending, code))
                     except AuthError as error:
                         st.error(str(error))
                     else:
@@ -102,6 +144,13 @@ def current_session(auth):
     except AuthError as error:
         clear_session()
         st.warning(str(error))
+        return None
+    except Exception:
+        # The backend was unreachable or restarted (its sessions are gone): fail closed.
+        logger.exception("Session validation failed.")
+        reset_aws_connection()
+        clear_session()
+        st.warning("Your session could not be verified. Please sign in again.")
         return None
 
 
@@ -179,13 +228,16 @@ with st.sidebar:
                     st.error("Tick the box to confirm.")
                 else:
                     try:
-                        auth.delete_account(
-                            st.session_state["session_id"], st.session_state["access_token"], password, client_ip()
+                        call_auth(
+                            lambda service: service.delete_account(
+                                st.session_state["session_id"], st.session_state["access_token"], password, client_ip()
+                            )
                         )
                     except AuthError as error:
                         st.error(str(error))
                     except Exception:
                         logger.exception("Account deletion failed.")
+                        reset_aws_connection()
                         st.error("The account could not be deleted right now. Please try again.")
                     else:
                         clear_session()
