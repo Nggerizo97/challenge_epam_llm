@@ -50,7 +50,7 @@ class TokenBudget(Protocol):
     """Per-session token budget (see src.auth.sessions.SessionTokenBudget)."""
 
     def reserve(self, tokens: int) -> None:
-        """Reserve tokens before a call; raise SessionTokenLimitExceeded if over budget."""
+        """Reserve tokens before a call; raise TokenLimitExceeded if over budget."""
 
     def settle(self, reserved: int, actual: int) -> None:
         """Replace a reservation with the tokens the call really used."""
@@ -104,12 +104,28 @@ def _reserve_persistent_api_request(table_name: str, max_requests: int, now: dat
         raise RuntimeError("The persistent API quota could not be reserved.") from error
 
 
+def _release_persistent_api_request(table_name: str, now: datetime | None = None) -> None:
+    """Give back a monthly call reserved for a provider call that failed (not billed)."""
+    now = now or datetime.now(timezone.utc)
+    try:
+        _get_dynamodb_client().update_item(
+            TableName=table_name,
+            Key={"quota_key": {"S": f"llm-calls#{now:%Y-%m}"}},
+            UpdateExpression="ADD request_count :minus_one",
+            ConditionExpression="request_count > :zero",
+            ExpressionAttributeValues={":minus_one": {"N": "-1"}, ":zero": {"N": "0"}},
+        )
+    except Exception:
+        logger.exception("Could not release a persistent API request reservation.")
+
+
 def _invoke_llm(llm, prompt: str, budget: Optional[TokenBudget] = None):
     """Reserve session tokens and one provider call atomically before performing it.
 
-    The session budget is reserved first, so a session that is out of tokens never
-    consumes the global call quota. The worst case (prompt + max output tokens) is
-    reserved, then corrected to the real usage once the provider answers.
+    The token budget is reserved first, so a user who is out of tokens never consumes
+    the global call quota. The worst case (prompt + max output tokens) is reserved,
+    then corrected to the real usage once the provider answers. If the provider call
+    fails (bad key, outage...), nothing was billed, so both reservations are released.
     """
     global _api_request_count
     reserved = estimate_prompt_tokens(prompt) + settings.max_tokens if budget else 0
@@ -122,8 +138,17 @@ def _invoke_llm(llm, prompt: str, budget: Optional[TokenBudget] = None):
             if settings.dynamodb_quota_table:
                 _reserve_persistent_api_request(settings.dynamodb_quota_table, settings.max_api_requests)
             _api_request_count += 1
+    except Exception:
+        if budget:
+            budget.settle(reserved, 0)
+        raise
+    try:
         response = llm.invoke(prompt)
     except Exception:
+        with _api_request_lock:
+            _api_request_count -= 1
+        if settings.dynamodb_quota_table:
+            _release_persistent_api_request(settings.dynamodb_quota_table)
         if budget:
             budget.settle(reserved, 0)  # nothing was generated: give the tokens back
         raise
@@ -237,14 +262,13 @@ def generate_answer(
     Every provider call is charged to ``budget`` (the user's session) when given.
     Enforces cost guardrails and anti-hallucination citation checks.
     """
-    from src.auth.sessions import SessionTokenLimitExceeded
+    from src.auth.sessions import TokenLimitExceeded
 
     ABSTAIN_MSG = "I do not know based on the provided documents."
     QUOTA_MSG = (
         "This demo has reached its monthly request budget. "
         "Please try again after the budget resets."
     )
-    SESSION_LIMIT_MSG = "You have used all the tokens available for this session."
 
     if not context_docs:
         logger.info("No context documents retrieved. Abstaining.")
@@ -264,9 +288,10 @@ def generate_answer(
             response = _invoke_llm(build_llm(), prompt, budget)
             answer_text = response.content.strip() if hasattr(response, "content") else str(response).strip()
             break
-        except SessionTokenLimitExceeded:
-            logger.info("Session token budget exhausted; refusing the call.")
-            return SESSION_LIMIT_MSG, []
+        except TokenLimitExceeded as limit_error:
+            # Session, daily-user or daily-IP budget: the message says which.
+            logger.info("Token budget exhausted; refusing the call.")
+            return str(limit_error), []
         except APIRequestLimitExceeded:
             # The quota gates every provider, so falling back would only fail again.
             # Surface a distinct message: silently reusing ABSTAIN_MSG here makes an

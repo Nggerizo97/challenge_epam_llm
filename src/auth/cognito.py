@@ -1,6 +1,7 @@
 """Thin wrapper over the Cognito user pool API (sign-up, sign-in, token checks)."""
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 
@@ -13,6 +14,10 @@ _PHONE_RE = re.compile(r"^\+[1-9]\d{6,14}$")
 
 class AuthError(Exception):
     """An error whose message is safe to show to the user."""
+
+
+class InvalidCredentials(AuthError):
+    """Wrong username or password (counted as a failed sign-in)."""
 
 
 @dataclass(frozen=True)
@@ -33,6 +38,28 @@ def parse_identifier(raw: str) -> Identifier:
     if not _PHONE_RE.match(phone):
         raise AuthError("Enter a valid e-mail or a phone number in international format, e.g. +573001234567.")
     return Identifier(phone, "phone_number")
+
+
+# Providers that ignore dots in the local part, so "a.b@gmail.com" is "ab@gmail.com".
+_DOT_INSENSITIVE_DOMAINS = {"gmail.com": "gmail.com", "googlemail.com": "gmail.com"}
+
+
+def identity_key(identifier: Identifier) -> str:
+    """Stable, hashed key for the person behind an identifier, used for usage limits.
+
+    E-mail aliases that reach the same inbox ("ana+1@x.com", "a.na@gmail.com") map to
+    the same key, so they share one daily token budget. The key is hashed so counters
+    in DynamoDB do not contain e-mail addresses or phone numbers.
+    """
+    value = identifier.username
+    if identifier.attribute == "email":
+        local, _, domain = value.partition("@")
+        local = local.split("+", 1)[0]
+        if domain in _DOT_INSENSITIVE_DOMAINS:
+            domain = _DOT_INSENSITIVE_DOMAINS[domain]
+            local = local.replace(".", "")
+        value = f"{local}@{domain}"
+    return hashlib.sha256(f"{identifier.attribute}:{value}".encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -112,7 +139,7 @@ class CognitoAuth:
                 raise AuthError("Confirm your account before signing in.") from error
             if code in {"NotAuthorizedException", "UserNotFoundException"}:
                 # Same message for both, so sign-in does not reveal which accounts exist.
-                raise AuthError("Incorrect e-mail/phone or password.") from error
+                raise InvalidCredentials("Incorrect e-mail/phone or password.") from error
             if code == "PasswordResetRequiredException":
                 raise AuthError("A password reset is required for this account.") from error
             raise
@@ -137,6 +164,15 @@ class CognitoAuth:
             if attribute["Name"] == "sub":
                 return attribute["Value"]
         raise AuthError("Your session could not be verified. Please sign in again.")
+
+    def delete_user(self, access_token: str) -> None:
+        """Delete the signed-in user. Cognito invalidates all of their tokens."""
+        try:
+            self._idp.delete_user(AccessToken=access_token)
+        except ClientError as error:
+            if _code(error) in {"NotAuthorizedException", "UserNotFoundException"}:
+                raise AuthError("Your session has expired. Please sign in again.") from error
+            raise
 
     def sign_out(self, access_token: str) -> None:
         """Revoke every token issued to this user's current sign-ins."""

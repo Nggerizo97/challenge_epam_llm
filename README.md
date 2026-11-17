@@ -278,10 +278,14 @@ Users must sign in before they can ask questions. Everything runs locally on the
 
 | Control | How it works |
 | :--- | :--- |
-| **Cognito sign-up / sign-in** | Users register with an **e-mail or a phone number** (E.164, e.g. `+573001234567`) in a Cognito user pool. Wrong password and unknown user return the same message. |
-| **Session in DynamoDB** | After sign-in a session record (`session_id`, Cognito `sub`, client IP, expiry, `tokens_used`, `token_limit`) is written to the `SESSIONS_TABLE`. Cognito tokens are never stored there. Every question re-validates the session record *and* the Cognito access token (`GetUser`), so expired, signed-out or mismatched sessions are rejected. |
-| **Token limit per session** | Before each LLM call the worst case (`prompt estimate + MAX_TOKENS`) is reserved with an atomic conditional `UpdateItem`; after the call it is corrected to the usage reported by the provider (refunded if the call fails). Once `SESSION_TOKEN_LIMIT` would be exceeded, the provider is not called. |
-| **Account creation per IP** | At most `SIGNUP_LIMIT_PER_IP` accounts (e-mail *or* phone) per client IP per `SIGNUP_WINDOW_SECONDS`, counted atomically in the `RATE_LIMIT_TABLE`. IPv6 clients are limited per `/64`. Sign-ups rejected for invalid input do not count. Behind a reverse proxy, set `TRUSTED_PROXY_HOPS` so the real client IP is read from `X-Forwarded-For`. |
+| **Cognito sign-up / sign-in** | Users register with an **e-mail or a phone number** (E.164, e.g. `+573001234567`) in a Cognito user pool. Wrong password and unknown user return the same message, so sign-in does not reveal which accounts exist. |
+| **Session in DynamoDB** | After sign-in a session record (`session_id`, Cognito `sub`, hashed identity, client IP, expiry, `tokens_used`, `token_limit`) is written to the `SESSIONS_TABLE`. Cognito tokens are never stored there. Every question re-validates the session record *and* the Cognito access token (`GetUser`), so expired, signed-out, deleted or mismatched sessions are rejected. |
+| **Token limits** | Every LLM call is charged to three budgets in **one atomic DynamoDB transaction**: the session (`SESSION_TOKEN_LIMIT`), the person per UTC day (`USER_DAILY_TOKEN_LIMIT`) and the client IP per UTC day (`IP_DAILY_TOKEN_LIMIT`). The worst case (`prompt estimate + MAX_TOKENS`) is reserved first and corrected to the usage the provider reports; failed calls are refunded. If any budget would be exceeded, nothing is charged and the provider is not called. |
+| **No budget resets** | The daily budget is keyed by the canonical e-mail/phone (hashed; `+alias` and Gmail dots removed), not by session or Cognito user id. Signing in again, using an alias, or deleting the account and creating it again does **not** give more tokens. |
+| **Account creation per IP** | At most `SIGNUP_LIMIT_PER_IP` accounts (e-mail *or* phone) per client IP per `SIGNUP_WINDOW_SECONDS`, counted atomically. IPv6 clients are limited per `/64`. Sign-ups rejected for invalid input do not count; deleted accounts do. Behind a reverse proxy, set `TRUSTED_PROXY_HOPS` so the real client IP is read from `X-Forwarded-For`. |
+| **Sign-in lockout** | After `LOGIN_MAX_FAILURES_PER_ACCOUNT` wrong passwords for one account, or `LOGIN_MAX_FAILURES_PER_IP` from one IP, sign-in is refused for the rest of `LOGIN_FAILURE_WINDOW_SECONDS`. |
+| **Delete account** | Users can delete their account from the sidebar after re-entering their password. Cognito invalidates all their tokens, so every open session stops working. |
+| **Global cost cap** | `MAX_API_REQUESTS` (per process) and, if set, the DynamoDB monthly quota still cap all provider calls; calls that fail at the provider no longer count. |
 
 **Run it locally**
 
@@ -303,6 +307,12 @@ Users must sign in before they can ask questions. Everything runs locally on the
 - It does not send verification e-mails or SMS, so `COGNITO_AUTO_CONFIRM=true` confirms accounts server-side.
 - It has no language model (Bedrock returns a placeholder text), so use `LLM_PROVIDER=groq`.
 - It is meant for local development and tests, not for a public deployment such as Streamlit Cloud.
+
+**Before a real production deployment** (real Amazon Cognito and DynamoDB instead of the emulator):
+- Set `COGNITO_AUTO_CONFIRM=false` so users must prove they own the e-mail or phone with a code. This is the strongest control against mass account creation.
+- Serve the app only over HTTPS, and set `TRUSTED_PROXY_HOPS` to the number of proxies in front of it.
+- Enable Cognito threat protection and an SMS spending limit (phone sign-ups send paid SMS).
+- Raise `MAX_API_REQUESTS` (or rely on the monthly DynamoDB quota): it is shared by all users of a process.
 
 **Tests** — `tests/test_auth_emulator.py` runs the full flow against a live emulator and is skipped when none is reachable:
 ```bash

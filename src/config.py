@@ -60,6 +60,16 @@ class Settings:
     # Never longer than the Cognito access token lifetime.
     session_ttl_seconds: int = max(int(os.getenv("SESSION_TTL_SECONDS", "3600")), 60)
 
+    # Daily (UTC) token limits shared by all sessions of one person / one IP, so signing
+    # in again or opening more accounts does not reset or multiply the budget.
+    user_daily_token_limit: int = max(int(os.getenv("USER_DAILY_TOKEN_LIMIT", "30000")), 1)
+    ip_daily_token_limit: int = max(int(os.getenv("IP_DAILY_TOKEN_LIMIT", "100000")), 1)
+
+    # Failed sign-ins tolerated per IP and per account in a window, against password guessing.
+    login_max_failures_per_ip: int = max(int(os.getenv("LOGIN_MAX_FAILURES_PER_IP", "20")), 1)
+    login_max_failures_per_account: int = max(int(os.getenv("LOGIN_MAX_FAILURES_PER_ACCOUNT", "5")), 1)
+    login_failure_window_seconds: int = max(int(os.getenv("LOGIN_FAILURE_WINDOW_SECONDS", "900")), 60)
+
     # Per-IP limit on account creation (fixed window), to stop mass sign-ups.
     rate_limit_table: str = os.getenv("RATE_LIMIT_TABLE", "challenge-epam-llm-rate-limits")
     signup_limit_per_ip: int = max(int(os.getenv("SIGNUP_LIMIT_PER_IP", "3")), 1)

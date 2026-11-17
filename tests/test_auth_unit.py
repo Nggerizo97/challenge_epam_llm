@@ -1,8 +1,8 @@
 import unittest
 
-from src.auth.cognito import AuthError, parse_identifier
+from src.auth.cognito import AuthError, identity_key, parse_identifier
 from src.auth.rate_limit import ip_bucket
-from src.auth.sessions import SessionTokenLimitExceeded
+from src.auth.sessions import TokenLimitExceeded
 from src.config import settings
 from src.generation import pipeline
 from src.ui.client_ip import resolve_client_ip
@@ -21,6 +21,23 @@ class IdentifierTests(unittest.TestCase):
         for raw in ("", "not-an-email@", "3001234567", "+0123456789", "a@b"):
             with self.assertRaises(AuthError, msg=raw):
                 parse_identifier(raw)
+
+
+class IdentityKeyTests(unittest.TestCase):
+    def key(self, raw):
+        return identity_key(parse_identifier(raw))
+
+    def test_aliases_of_one_inbox_share_a_key(self):
+        self.assertEqual(self.key("ana.perez@gmail.com"), self.key("anaperez+llm@googlemail.com"))
+        self.assertEqual(self.key("ana@example.com"), self.key("Ana+test@Example.com"))
+
+    def test_different_people_get_different_keys(self):
+        # Dots are significant outside Gmail.
+        self.assertNotEqual(self.key("a.na@example.com"), self.key("ana@example.com"))
+        self.assertNotEqual(self.key("+573001234567"), self.key("+573001234568"))
+
+    def test_key_does_not_contain_the_identifier(self):
+        self.assertNotIn("ana", self.key("ana@example.com"))
 
 
 class IpTests(unittest.TestCase):
@@ -54,7 +71,7 @@ class _Budget:
 
     def reserve(self, tokens):
         if self.used + tokens > self.limit:
-            raise SessionTokenLimitExceeded()
+            raise TokenLimitExceeded()
         self.used += tokens
         self.calls.append(("reserve", tokens))
 
@@ -90,7 +107,7 @@ class SessionBudgetInPipelineTests(unittest.TestCase):
 
     def test_refuses_before_calling_the_provider_when_out_of_tokens(self):
         llm = _LLM(usage={"total_tokens": 10})
-        with self.assertRaises(SessionTokenLimitExceeded):
+        with self.assertRaises(TokenLimitExceeded):
             pipeline._invoke_llm(llm, "x" * 300, _Budget(limit=settings.max_tokens))
         self.assertEqual(llm.invoked, 0)
         self.assertEqual(pipeline._api_request_count, 0, "global quota must not be consumed")
@@ -100,6 +117,13 @@ class SessionBudgetInPipelineTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             pipeline._invoke_llm(_LLM(fail=True), "prompt", budget)
         self.assertEqual(budget.used, 0)
+
+    def test_failed_provider_calls_do_not_use_the_global_quota(self):
+        for _ in range(settings.max_api_requests + 3):
+            with self.assertRaises(RuntimeError):
+                pipeline._invoke_llm(_LLM(fail=True), "prompt")
+        self.assertEqual(pipeline._api_request_count, 0)
+        pipeline._invoke_llm(_LLM(), "prompt")  # a working provider can still be used
 
     def test_refunds_the_reservation_when_the_global_quota_is_exhausted(self):
         pipeline._api_request_count = settings.max_api_requests

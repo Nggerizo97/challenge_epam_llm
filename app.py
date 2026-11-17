@@ -117,6 +117,9 @@ except Exception:
     st.error("The authentication service is unavailable, so questions are disabled.")
     st.stop()
 
+if "flash" in st.session_state:
+    st.success(st.session_state.pop("flash"))
+
 session = current_session(auth)
 if session is None:
     render_auth(auth)
@@ -143,10 +146,21 @@ if st.button("Ask") and question.strip():
     except Exception:
         pass
 
-# Rendered last so the token counter includes the question just asked.
+# Rendered last so the token counters include the question just asked.
 with st.sidebar:
-    st.write(f"Signed in as **{session.username}**")
-    st.metric("Session tokens left", f"{session.tokens_remaining:,}", help=f"Limit: {session.token_limit:,}")
+    st.caption("Signed in as")
+    st.text(session.username)  # plain text: never render user-supplied values as markdown
+    try:
+        usage = auth.usage(session)
+        st.metric("Session tokens left", f"{usage.session_remaining:,}", help=f"Limit: {usage.session_limit:,}")
+        st.metric(
+            "Your tokens left today",
+            f"{usage.user_today_remaining:,}",
+            help=f"Daily limit: {usage.user_daily_limit:,}, shared by all your sessions. Resets at 00:00 UTC.",
+        )
+    except Exception:
+        logger.exception("Could not read token usage.")
+
     if st.button("Sign out"):
         try:
             auth.logout(st.session_state["session_id"], st.session_state["access_token"])
@@ -154,3 +168,26 @@ with st.sidebar:
             logger.exception("Sign-out failed.")
         clear_session()
         st.rerun()
+
+    with st.expander("Delete my account"):
+        st.write("This permanently deletes your account. Today's token usage still counts if you sign up again.")
+        with st.form("delete_account"):
+            password = st.text_input("Confirm your password", type="password")
+            confirmed = st.checkbox("I understand this cannot be undone")
+            if st.form_submit_button("Delete account", type="primary"):
+                if not confirmed:
+                    st.error("Tick the box to confirm.")
+                else:
+                    try:
+                        auth.delete_account(
+                            st.session_state["session_id"], st.session_state["access_token"], password, client_ip()
+                        )
+                    except AuthError as error:
+                        st.error(str(error))
+                    except Exception:
+                        logger.exception("Account deletion failed.")
+                        st.error("The account could not be deleted right now. Please try again.")
+                    else:
+                        clear_session()
+                        st.session_state["flash"] = "Your account was deleted."
+                        st.rerun()
